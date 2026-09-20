@@ -7,6 +7,15 @@
   ],
   "license": "MIT",
   "author": "betim-hodza",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Betim-Hodza/devin-usage.git"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
   "pi": {
     "extensions": [
       "./extensions"
