@@ -53,13 +53,13 @@ comes from pi's own model registry, nothing is stored by this extension.
 ## Install
 
 ```bash
-pi install git:github.com/betim-hodza/devin-usage
+pi install npm:devin-usage
 ```
 
 or try it once without installing:
 
 ```bash
-pi -e git:github.com/betim-hodza/devin-usage
+pi -e npm:devin-usage
 ```
 
 ## License
