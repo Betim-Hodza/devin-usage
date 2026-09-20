@@ -1,6 +1,6 @@
 # devin-usage
 
-Account plan, quota and credit usage for the [Devin](https://devin.ai) provider
+Account plan, quota and credit usage for the [Devin](https://devin.ai) (Cognition) provider
 in [pi](https://github.com/mariozechner/pi) — quota bars in a transcript card
 plus a compact footer status.
 
@@ -14,13 +14,13 @@ A summary also lands in the footer status on session start
 
 ## What you get
 
-- **Plan** — Devin Pro / Teams / Free, org, billing window
-- **Daily & weekly quota** — % remaining with reset countdowns
-- **Credit buckets** — prompt / flow / flex credits used and left
-- **Model burn rates** — every registered Devin model's `credit_multiplier`
+- **Plan**: Devin Pro / Teams / Free, org, billing window
+- **Daily & weekly quota**: % remaining with reset countdowns
+- **Credit buckets**: prompt / flow / flex credits used and left
+- **Model burn rates**: every registered Devin model's `credit_multiplier`
   (×2 cheap, ×230 premium) sorted cheapest-first, with cost tier and pricing
   type, flagging your active model
-- **Overage** — any overage balance surfaced when present
+- **Overage**: any overage balance surfaced when present
 
 ## How it works
 
