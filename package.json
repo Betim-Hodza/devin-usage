@@ -1,0 +1,19 @@
+{
+  "name": "devin-usage",
+  "version": "0.1.0",
+  "description": "Devin account plan, quota and credit usage in pi — from the Connect RPC the native Devin CLI issues at startup.",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "author": "betim-hodza",
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  }
+}
