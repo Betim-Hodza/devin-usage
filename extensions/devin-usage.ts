@@ -40,17 +40,9 @@ function encodeVarint(value: number | bigint): Buffer {
 	return Buffer.from(bytes);
 }
 
-function encodeTag(fieldNum: number, wire: number): Buffer {
-	return encodeVarint((fieldNum << 3) | wire);
-}
-
 function encodeString(fieldNum: number, s: string): Buffer {
 	const buf = Buffer.from(s, "utf8");
-	return Buffer.concat([encodeTag(fieldNum, 2), encodeVarint(buf.length), buf]);
-}
-
-function encodeMessage(fieldNum: number, body: Buffer): Buffer {
-	return Buffer.concat([encodeTag(fieldNum, 2), encodeVarint(body.length), body]);
+	return Buffer.concat([encodeVarint((fieldNum << 3) | 2), encodeVarint(buf.length), buf]);
 }
 
 interface ProtoField {
@@ -104,35 +96,28 @@ function* iterFields(buf: Buffer): Generator<ProtoField> {
 	}
 }
 
-function fieldMsg(buf: Buffer, num: number): Buffer | undefined {
-	for (const f of iterFields(buf)) if (f.num === num && f.wire === 2) return f.value as Buffer;
+function field(buf: Buffer, num: number, wire: number): ProtoField | undefined {
+	for (const f of iterFields(buf)) if (f.num === num && f.wire === wire) return f;
 	return undefined;
 }
-function fieldStr(buf: Buffer, num: number): string | undefined {
-	for (const f of iterFields(buf))
-		if (f.num === num && f.wire === 2) return (f.value as Buffer).toString("utf8");
-	return undefined;
-}
+const fieldMsg = (buf: Buffer, num: number) => field(buf, num, 2)?.value as Buffer | undefined;
+const fieldStr = (buf: Buffer, num: number) => fieldMsg(buf, num)?.toString("utf8");
 /** Signed decode: proto int32/int64 negatives arrive sign-extended to 64 bits. */
-function fieldInt(buf: Buffer, num: number): number | undefined {
-	for (const f of iterFields(buf))
-		if (f.num === num && f.wire === 0) return Number(BigInt.asIntN(64, f.value as bigint));
-	return undefined;
-}
-function fieldBool(buf: Buffer, num: number): boolean | undefined {
+const fieldInt = (buf: Buffer, num: number) => {
+	const f = field(buf, num, 0);
+	return f ? Number(BigInt.asIntN(64, f.value as bigint)) : undefined;
+};
+const fieldBool = (buf: Buffer, num: number) => {
 	const v = fieldInt(buf, num);
 	return v === undefined ? undefined : v !== 0;
-}
-function fieldFloat(buf: Buffer, num: number): number | undefined {
-	for (const f of iterFields(buf)) if (f.num === num && f.wire === 5) return (f.value as Buffer).readFloatLE(0);
-	return undefined;
-}
+};
+const fieldFloat = (buf: Buffer, num: number) => {
+	const f = field(buf, num, 5);
+	return f ? (f.value as Buffer).readFloatLE(0) : undefined;
+};
 /** All length-delimited occurrences of `num` (repeated message fields). */
-function fieldMsgs(buf: Buffer, num: number): Buffer[] {
-	const out: Buffer[] = [];
-	for (const f of iterFields(buf)) if (f.num === num && f.wire === 2) out.push(f.value as Buffer);
-	return out;
-}
+const fieldMsgs = (buf: Buffer, num: number) =>
+	[...iterFields(buf)].filter(f => f.num === num && f.wire === 2).map(f => f.value as Buffer);
 
 // ── Devin RPC ────────────────────────────────────────────────────────────────
 
@@ -163,16 +148,16 @@ function buildCliMetadata(apiKey: string): Buffer {
 	]);
 }
 
-interface Timestamp { seconds: bigint; nanos: number }
-function parseTimestamp(buf: Buffer): Timestamp | undefined {
-	let seconds = 0n, nanos = 0;
+/** google.protobuf.Timestamp → epoch ms; undefined when the field is absent. */
+function timestampMs(buf?: Buffer): number | undefined {
+	if (!buf) return undefined;
+	let seconds = 0n, nanos = 0n;
 	for (const f of iterFields(buf)) {
 		if (f.num === 1 && f.wire === 0) seconds = f.value as bigint;
-		if (f.num === 2 && f.wire === 0) nanos = Number(f.value);
+		if (f.num === 2 && f.wire === 0) nanos = f.value as bigint;
 	}
-	return { seconds, nanos };
+	return Number(seconds) * 1000 + Number(nanos) / 1e6;
 }
-const tsMs = (t?: Timestamp) => (t ? Number(t.seconds) * 1000 + t.nanos / 1e6 : undefined);
 
 const TEAMS_TIER: Record<number, string> = {
 	1: "Teams", 2: "Pro", 3: "Enterprise Saas", 4: "Hybrid", 5: "Enterprise Self Hosted",
@@ -240,8 +225,9 @@ function parseModelConfigs(userStatusBuf: Buffer): ModelCost[] {
 	return out;
 }
 
-async function fetchDevinUsage(apiKey: string, signal?: AbortSignal): Promise<UsageReport> {
-	const body = encodeMessage(1, buildCliMetadata(apiKey)); // GetUserStatusRequest.metadata
+async function fetchDevinUsage(apiKey: string): Promise<UsageReport> {
+	const cliMetadata = buildCliMetadata(apiKey);
+	const body = Buffer.concat([encodeVarint((1 << 3) | 2), encodeVarint(cliMetadata.length), cliMetadata]);
 	const res = await fetch(`${HOST}${PATH}`, {
 		method: "POST",
 		headers: {
@@ -250,22 +236,15 @@ async function fetchDevinUsage(apiKey: string, signal?: AbortSignal): Promise<Us
 			accept: "*/*",
 		},
 		body,
-		signal,
 	});
 	if (!res.ok) throw new Error(`GetUserStatus failed: HTTP ${res.status}`);
 
 	let payload = Buffer.from(await res.arrayBuffer());
-	let userStatusBuf: Buffer | undefined;
-	let planInfoBuf: Buffer | undefined;
-	try {
-		userStatusBuf = fieldMsg(payload, 1);
-		planInfoBuf = fieldMsg(payload, 2);
-	} catch {
-		// Edges sometimes return gzipped protobuf
-		payload = gunzipSync(payload);
-		userStatusBuf = fieldMsg(payload, 1);
-		planInfoBuf = fieldMsg(payload, 2);
-	}
+	// Edges sometimes return gzipped protobuf — detect via magic bytes, since
+	// parsing gzip as proto yields no fields (and thus no throw to catch).
+	if (payload[0] === 0x1f && payload[1] === 0x8b) payload = gunzipSync(payload);
+	const userStatusBuf = fieldMsg(payload, 1);
+	const planInfoBuf = fieldMsg(payload, 2);
 	if (!userStatusBuf) throw new Error("GetUserStatus: empty user_status in response");
 
 	const report: UsageReport = {};
@@ -293,8 +272,8 @@ async function fetchDevinUsage(apiKey: string, signal?: AbortSignal): Promise<Us
 		if (!report.orgId) report.orgId = fieldStr(userStatusBuf, 5)?.trim() || undefined;
 
 		if (planStatusBuf) {
-			report.planStartMs = tsMs(parseTimestamp(fieldMsg(planStatusBuf, 2)!));
-			report.planEndMs = tsMs(parseTimestamp(fieldMsg(planStatusBuf, 3)!));
+			report.planStartMs = timestampMs(fieldMsg(planStatusBuf, 2));
+			report.planEndMs = timestampMs(fieldMsg(planStatusBuf, 3));
 			// -1 means the plan grants no bucket / unlimited — normalize to 0.
 			const nn = (v: number | undefined) => (v !== undefined && v > 0 ? v : 0);
 			const mk = (limit: number | undefined, used?: number, avail?: number) =>
@@ -340,6 +319,12 @@ function usageStatus(usedFraction: number | undefined): UsageStatus {
 	return "ok";
 }
 
+type Theme = { fg(c: string, t: string): string };
+
+const STATUS_RANK: Record<UsageStatus, number> = { unknown: 0, ok: 1, warning: 2, exhausted: 3 };
+
+const statusColor = (s: UsageStatus) => (s === "exhausted" ? "error" : s === "warning" ? "warning" : "success");
+
 /** Compact duration like omp's formatDuration: "30m", "2h30m", "3d2h". */
 function formatDuration(ms: number): string {
 	if (!Number.isFinite(ms) || ms <= 0) return "0m";
@@ -365,17 +350,14 @@ interface CardRow {
 /** Normalize a UsageReport into omp-style card rows (sorted most-pressing first). */
 function cardRows(r: UsageReport, nowMs: number): CardRow[] {
 	const rows: CardRow[] = [];
-	if (r.dailyQuotaPercent !== undefined) {
-		const fraction = 1 - r.dailyQuotaPercent / 100;
-		const resetMs = r.dailyResetUnix && r.dailyResetUnix * 1000 > nowMs
-			? r.dailyResetUnix * 1000 - nowMs : undefined;
-		rows.push({ label: "Daily", fraction, status: usageStatus(fraction), resetMs });
-	}
-	if (r.weeklyQuotaPercent !== undefined) {
-		const fraction = 1 - r.weeklyQuotaPercent / 100;
-		const resetMs = r.weeklyResetUnix && r.weeklyResetUnix * 1000 > nowMs
-			? r.weeklyResetUnix * 1000 - nowMs : undefined;
-		rows.push({ label: "Weekly", fraction, status: usageStatus(fraction), resetMs });
+	for (const { label, pct, reset } of [
+		{ label: "Daily", pct: r.dailyQuotaPercent, reset: r.dailyResetUnix },
+		{ label: "Weekly", pct: r.weeklyQuotaPercent, reset: r.weeklyResetUnix },
+	]) {
+		if (pct === undefined) continue;
+		const fraction = 1 - pct / 100;
+		const resetMs = reset && reset * 1000 > nowMs ? reset * 1000 - nowMs : undefined;
+		rows.push({ label, fraction, status: usageStatus(fraction), resetMs });
 	}
 	const credits: [string, UsageReport["prompt"]][] = [
 		["Prompt credits", r.prompt],
@@ -402,21 +384,19 @@ function cardRows(r: UsageReport, nowMs: number): CardRow[] {
 const LABEL_W = 14;
 const BAR_W = 20;
 
-function miniBar(fraction: number, status: UsageStatus, theme: { fg(c: string, t: string): string }): string {
+function miniBar(fraction: number, status: UsageStatus, theme: Theme): string {
 	const clamped = Math.min(Math.max(fraction, 0), 1);
 	const filled = Math.round(clamped * BAR_W);
-	const color = status === "exhausted" ? "error" : status === "warning" ? "warning" : "success";
-	return theme.fg(color, "█".repeat(filled)) + theme.fg("dim", "░".repeat(BAR_W - filled));
+	return theme.fg(statusColor(status), "█".repeat(filled)) + theme.fg("dim", "░".repeat(BAR_W - filled));
 }
 
-function rowLine(row: CardRow, theme: { fg(c: string, t: string): string }): string {
+function rowLine(row: CardRow, theme: Theme): string {
 	const label = theme.fg("muted", row.label.padEnd(LABEL_W));
 	if (row.fraction === undefined) {
 		return `  ${label} ${theme.fg("dim", row.usedText ?? "no data")}`;
 	}
 	const freePct = Math.max(0, Math.round((1 - row.fraction) * 100));
-	const color = row.status === "exhausted" ? "error" : row.status === "warning" ? "warning" : "success";
-	const pct = theme.fg(color, `${freePct}% free`.padStart(7));
+	const pct = theme.fg(statusColor(row.status), `${freePct}% free`.padStart(7));
 	const reset = row.resetMs !== undefined ? theme.fg("dim", `  ${formatDuration(row.resetMs)}`) : "";
 	return `  ${label} ${miniBar(row.fraction, row.status, theme)} ${pct}${reset}`;
 }
@@ -443,11 +423,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const r = entry.data as UsageReport;
 		const now = Date.now();
 		const rows = cardRows(r, now);
-		const worst = rows.reduce<UsageStatus>((w, row) => {
-			const rank = { unknown: 0, ok: 1, warning: 2, exhausted: 3 };
-			return rank[row.status] > rank[w] ? row.status : w;
-		}, "unknown");
-		const dotColor = worst === "exhausted" ? "error" : worst === "warning" ? "warning" : worst === "ok" ? "success" : "dim";
+		const worst = rows.reduce<UsageStatus>((w, row) => (STATUS_RANK[row.status] > STATUS_RANK[w] ? row.status : w), "unknown");
+		const dotColor = worst === "unknown" ? "dim" : statusColor(worst);
 
 		const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
 		const title = theme.bold(`Devin${r.planName ? ` · ${r.planName}` : ""}`);
